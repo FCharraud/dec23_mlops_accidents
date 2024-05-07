@@ -1,0 +1,231 @@
+services:
+
+  # database microservice
+  database:
+    pull_policy: build
+    build:
+      context: database
+      dockerfile: database.Dockerfile
+    image: ${DOCKER_HUB_REPO}:database
+    container_name: database
+    volumes:
+      - type: bind
+        source: ~/mariadb_data
+        target: /var/lib/mysql
+    networks:
+      - shield
+
+  # api gateway
+  gateway:
+    depends_on:
+      training:
+        condition: service_started
+    pull_policy: build
+    build:
+      context: gateway
+      dockerfile: gateway.Dockerfile
+    image: ${DOCKER_HUB_REPO}:gateway
+    container_name: gateway
+    networks:
+      - shield
+    volumes:
+      - type: bind
+        source: ~/logs
+        target: /logs
+    ports:
+      - target: 8001
+        published: "8001"
+
+  # users microservice
+  users:
+    depends_on:
+      database:
+        condition: service_started
+    pull_policy: build
+    build:
+      context: users
+      dockerfile: users.Dockerfile
+    image: ${DOCKER_HUB_REPO}:users
+    container_name: users
+    networks:
+      - shield
+
+  # data-download-prep microservice
+  data-download-prep:
+    depends_on:
+      users:
+        condition: service_started
+    pull_policy: build
+    build:
+      context: data-download-prep
+      dockerfile: data-download-prep.Dockerfile
+    image: ${DOCKER_HUB_REPO}:data-download-prep
+    container_name: data-download-prep
+    networks:
+      - shield
+    volumes:
+      - type: volume
+        source: data-download-prep
+        target: /home/shield/data-download-prep
+      - type: volume
+        source: logs
+        target: /home/shield/logs
+
+  # training microservice
+  training:
+    depends_on:
+      data-download-prep:
+        condition: service_started
+    pull_policy: build ## always build the image from a local Dockerfile
+    build:
+      context: ../.. ## use repo root as build context to enable Dockerfile to access files located outside of its own working directory
+      dockerfile: src/docker/training/training.Dockerfile ## path to Dockerfile
+    image: ${DOCKER_HUB_REPO}:training
+    container_name: training
+    networks:
+      - shield
+    volumes:
+      - type: volume
+        source: data-download-prep
+        target: /home/shield/data-download-prep
+        read_only: true
+      - type: volume
+        source: logs
+        target: /home/shield/logs
+      - type: volume
+        source: models
+        target: /home/shield/models
+
+  # prediction microservice
+  prediction:
+    depends_on:
+      gateway:
+        condition: service_started
+    pull_policy: build
+    build:
+      context: ../..
+      dockerfile: src/docker/prediction/prediction.Dockerfile
+    image: ${DOCKER_HUB_REPO}:prediction
+    container_name: prediction
+    networks:
+      - shield
+    volumes:
+      - type: volume
+        source: data-download-prep
+        target: /home/shield/data-download-prep
+        read_only: true
+      - type: volume
+        source: logs
+        target: /home/shield/logs
+      - type: volume
+        source: models
+        target: /home/shield/models
+        read_only: true
+
+  # scoring microservice
+  scoring:
+    depends_on:
+      gateway:
+        condition: service_started
+    pull_policy: build
+    build:
+      context: ../..
+      dockerfile: src/docker/scoring/scoring.Dockerfile
+    image: ${DOCKER_HUB_REPO}:scoring
+    container_name: scoring
+    networks:
+      - shield
+    volumes:
+      - type: volume
+        source: data-download-prep
+        target: /home/shield/data-download-prep
+        read_only: true
+      - type: volume
+        source: logs
+        target: /home/shield/logs
+      - type: volume
+        source: models
+        target: /home/shield/models
+        read_only: true
+
+  # testing microservice
+  testing:
+    pull_policy: build
+    build:
+      context: ../..
+      dockerfile: src/docker/testing/testing.Dockerfile
+    image: ${DOCKER_HUB_REPO}:testing
+    container_name: testing
+    networks:
+      - shield
+    volumes:
+      - type: volume
+        source: logs
+        target: /home/shield/logs
+        read_only: true
+
+# initialization microservice
+  initialization:
+    depends_on:
+      gateway:
+        condition: service_started
+    pull_policy: build
+    build:
+      context: initialization
+      dockerfile: initialization.Dockerfile
+    image: ${DOCKER_HUB_REPO}:initialization
+    container_name: initialization
+    networks:
+      - shield
+    volumes:
+      - type: volume
+        source: data-download-prep
+        target: /home/shield/data-download-prep
+      - type: volume
+        source: logs
+        target: /home/shield/logs
+      - type: volume
+        source: models
+        target: /home/shield/models
+
+  # frontend app
+  frontend:
+    depends_on:
+      gateway:
+        condition: service_started
+    pull_policy: build
+    build:
+      context: frontend
+      dockerfile: frontend.Dockerfile
+    image: ${DOCKER_HUB_REPO}:frontend
+    container_name: frontend
+    networks:
+      - shield
+    volumes:
+      - type: volume
+        source: logs
+        target: /home/shield/logs
+        read_only: true
+      - type: bind
+        source: ~/logs
+        target: /home/shield/logs_gateway
+        read_only: true
+    ports:
+        - target: 8501
+          published: "8501"
+
+
+# network declarations
+networks:
+  shield:
+    name: shield ## create network with this specific name
+
+
+# volume declarations
+volumes:
+  data-download-prep:
+    name: data-download-prep ## create volume with this specific name
+  logs:
+    name: logs
+  models:
+    name: models

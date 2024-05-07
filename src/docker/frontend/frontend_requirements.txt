@@ -1,0 +1,5 @@
+altair<5
+pandas
+plotly
+protobuf==3.20.*
+streamlit>=1.8.1

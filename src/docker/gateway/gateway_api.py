@@ -1,0 +1,439 @@
+# >>>>>>>> IMPORTS <<<<<<<<
+import datetime
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
+import requests
+from sqlalchemy import text
+from sqlalchemy.engine import create_engine
+import time
+
+# >>>>>>>> CLASS DECLARATIONS <<<<<<<<
+
+
+## define input data model for endpoint /users/register
+class NewUser(BaseModel):
+    username: str
+    password: str
+    rights: int
+
+
+## define input data model for endpoint /users/remove
+class OldUser(BaseModel):
+    username: str
+
+
+## define input data model for endpoint /data-download-prep/run
+class YearRange(BaseModel):
+    start_year: int  ### admin shall use valid year, e.g. 2021
+    end_year: int  ### admin shall use valid year, e.g. 2021
+
+
+## define input data model for endpoint /prediction/call
+class InputDataPredCall(BaseModel):
+    model_config = ConfigDict(revalidate_instances="always")
+    place: int
+    catu: int
+    sexe: int
+    secu1: float
+    year_acc: int
+    victim_age: int
+    catv: int
+    obsm: int
+    motor: int
+    catr: int
+    circ: int
+    surf: int
+    situ: int
+    vma: int
+    jour: int
+    mois: int
+    lum: int
+    dep: int
+    com: int
+    agg_: int
+    inter: int
+    atm: int
+    col: int
+    lat: float
+    long: float
+    hour: int
+    nb_victim: int
+    nb_vehicules: int
+
+
+## define input data model for endpoint /scoring/label_prediction
+class InputDataLabelPred(BaseModel):
+    model_config = ConfigDict(revalidate_instances="always")
+    request_id: int
+    y_true: int
+
+
+# >>>>>>>> FUNCTION DECLARATIONS <<<<<<<<
+
+
+def return_request(response):
+    if response.status_code == 200:
+        return eval(response.content.decode("utf-8"))
+    else:
+        print(response.content.decode("utf-8"))
+        raise HTTPException(status_code=400, detail="Bad request.")
+
+
+def get_all_users():
+    response = requests.get(url="http://users:8002/all")
+    return return_request(response)
+
+
+def verify_rights(identification, rights):
+    """
+    rights:
+    - 0 for user, robot and administrator,
+    - 1 for robot and administrator
+    - 2 for administrator
+    """
+
+    user_type = {0: "User", 1: "Robot", 2: "Administrator"}
+
+    try:
+        user, pwd = identification.split(":")
+    except:
+        raise HTTPException(
+            status_code=401,
+            detail="Identification doesn't match the following pattern: username:password",
+        )
+
+    users_db = get_all_users()
+
+    if user in users_db and users_db[user]["admin"] >= rights:
+        if users_db[user]["pwd"] == pwd:
+            return user
+        else:
+            raise HTTPException(status_code=401, detail="Invalid password.")
+    else:
+        raise HTTPException(
+            status_code=403, detail=f"{user_type[rights]} rights required."
+        )
+
+
+def log(data, logname):
+    full_logname = f"/logs/{logname}"
+    with open(full_logname, "a") as logfile:
+        logfile.write(f"{data}\n")
+
+
+# >>>>>>>> API GATEWAY DECLARATION <<<<<<<<
+api = FastAPI(title="🛡️ SHIELD API Gateway")
+
+
+# define database connection
+SQLALCHEMY_DATABASE_URI = (
+    "mysql+pymysql://user:password@database:3306/shield_project_db"
+)
+mariadb_engine = create_engine(
+    SQLALCHEMY_DATABASE_URI, echo=False
+)  # echo is for debug mode
+
+
+# >>>>>>>> API GATEWAY STATUS CHECK <<<<<<<<
+
+
+@api.get(path="/gateway/status", tags=["API Gateway"], name="check API gateway status")
+async def gateway_status():
+    response = "The API gateway is up."
+    return JSONResponse(content=response)
+
+
+# >>>>>>>> MICROSERVICES - USERS <<<<<<<<
+
+
+@api.get(
+    path="/users/status",
+    tags=["MICROSERVICES - Users"],
+    name="check users microservice API status",
+)
+async def users_status():
+    response = requests.get(url="http://users:8002/status")
+    return return_request(response)
+
+
+@api.get(path="/users/all", tags=["MICROSERVICES - Users"], name="get all users")
+async def users_all():
+    return get_all_users()
+
+
+@api.post(path="/users/register", tags=["MICROSERVICES - Users"], name="register user")
+async def users_register(new_user: NewUser, identification=Header(None)):
+    """Add a user to the database.
+    Administrator rights required.
+    Identification field should be filled in as follows: username:password.
+    """
+
+    verify_rights(identification, 2)  # 2 for administrator only
+    payload = new_user.model_dump()
+    response = requests.post(
+        url="http://users:8002/register",
+        json=payload,
+    )
+    return return_request(response)
+
+
+@api.delete(path="/users/remove", tags=["MICROSERVICES - Users"], name="remove user")
+async def users_remove(old_user: OldUser, identification=Header(None)):
+    """Remove a user from the database.
+    Administrator rights required.
+    Identification field should be filled in as follows: username:password.
+    """
+
+    verify_rights(identification, 2)  # 2 for administrator only
+    payload = old_user.model_dump()
+    response = requests.delete(url="http://users:8002/remove", json=payload)
+    return return_request(response)
+
+
+# >>>>>>>> MICROSERVICES - DATA-DOWNLOAD-PREP <<<<<<<<
+
+
+@api.get(
+    path="/data-download-prep/status",
+    tags=["MICROSERVICES - Data-Download-Prep"],
+    name="check data-download-prep microservice API status",
+)
+async def data_download_prep_status():
+    response = requests.get(url="http://data-download-prep:8003/status")
+    return return_request(response)
+
+
+@api.post(
+    path="/data-download-prep/run",
+    tags=["MICROSERVICES - Data-Download-Prep"],
+    name="download and prepare data",
+)
+async def data_download_prep_run(year_range: YearRange, identification=Header(None)):
+    user = verify_rights(identification, 1)  # 1 for robot and administrator
+    payload = year_range.model_dump()
+    start = datetime.datetime.now()
+    response = requests.post(
+        url="http://data-download-prep:8003/run",
+        json=payload,
+    )
+    end = datetime.datetime.now()
+    duration = end - start
+    try:
+        ## save data in Database lineage
+        with mariadb_engine.connect() as connection:
+            connection.execute(
+                text(f'INSERT INTO lineage_table (Debut, Fin, Duree, User, Commentaire) VALUES ("{str(year_range.start_year)}", "{str(year_range.end_year)}", "{str(datetime.timedelta(duration.days, duration.seconds))}", "{user}", "téléchargement des données");')
+            )
+            connection.execute(text("COMMIT;"))
+    except BaseException as err:
+        print("WARN: data download prep not saved in lineage table")
+        print(f"WARN:{str(err)}")
+    return return_request(response)
+
+
+# >>>>>>>> MICROSERVICES - TRAINING <<<<<<<<
+
+
+@api.get(
+    path="/training/status",
+    tags=["MICROSERVICES - Training"],
+    name="check training microservice API status",
+)
+async def training_status():
+    response = requests.get(url="http://training:8004/status")
+    return return_request(response)
+
+
+@api.get(path="/training/train", tags=["MICROSERVICES - Training"], name="train model")
+async def training_train(identification=Header(None)):
+    user = verify_rights(identification, 1)  # 1 for robot and administrator
+    start = datetime.datetime.now()
+    response = requests.get(url="http://training:8004/train")
+    end = datetime.datetime.now()
+    duration = end - start
+    log(
+        f"{start.strftime('%Y-%m-%d %H:%M:%S')}: {user}, training took {end - start}s",
+        "training.csv",
+    )
+
+    ## save data in Database lineage
+    try:
+        with mariadb_engine.connect() as connection:
+            connection.execute(
+                text(f'INSERT INTO lineage_table (Debut, Fin, Duree, User, Commentaire) VALUES ("-", "-", "{str(datetime.timedelta(duration.days, duration.seconds))}", "{user}", "entraînement du modèle");')
+            )
+            connection.execute(text("COMMIT;"))
+    except BaseException as err:
+        print("WARN: data of train not saved in lineage table")
+        print(f"WARN:{str(err)}")
+
+    return return_request(response)
+
+
+@api.get(
+    path="/training/retrain", tags=["MICROSERVICES - Training"], name="retrain model"
+)
+async def training_retrain(identification=Header(None)):
+    user = verify_rights(identification, 1)  # 1 for robot and administrator
+    start = datetime.datetime.now()
+    response = requests.get(url="http://training:8004/retrain")
+    end = datetime.datetime.now()
+    duration = end - start
+    log(
+        f"{start.strftime('%Y-%m-%d %H:%M:%S')}: {user}, retraining took {end - start}s",
+        "training.csv",
+    )
+
+    ## save data in Database lineage
+    try:
+        with mariadb_engine.connect() as connection:
+            connection.execute(
+                text(f'INSERT INTO lineage_table (Debut, Fin, Duree, User, Commentaire) VALUES ("-", "-", "{str(datetime.timedelta(duration.days, duration.seconds))}", "{user}", "réentraînement du modèle");')
+            )
+            connection.execute(text("COMMIT;"))
+    except BaseException as err:
+        print("WARN: data of retrain not saved in lineage table")
+        print(f"WARN:{str(err)}")
+
+
+    return return_request(response)
+
+
+# >>>>>>>> MICROSERVICES - PREDICTION <<<<<<<<
+
+
+@api.get(
+    path="/prediction/status",
+    tags=["MICROSERVICES - Prediction"],
+    name="check prediction microservice API status",
+)
+async def prediction_status():
+    response = requests.get(url="http://prediction:8005/status")
+    return return_request(response)
+
+
+@api.get(
+    path="/prediction/test",
+    tags=["MICROSERVICES - Prediction"],
+    name="predict from test",
+)
+async def prediction_test(identification=Header(None)):
+    verify_rights(identification, 0)  # at least user rights
+    response = requests.get(url="http://prediction:8005/test")
+    return return_request(response)
+
+
+@api.post(
+    path="/prediction/call",
+    tags=["MICROSERVICES - Prediction"],
+    name="predict from call",
+)
+async def prediction_call(input_data: InputDataPredCall, identification=Header(None)):
+    verify_rights(identification, 0)  # at least user rights
+    payload = input_data.model_dump()
+    response = requests.post(url="http://prediction:8005/call", json=payload)
+    return return_request(response)
+
+
+# >>>>>>>> MICROSERVICES - SCORING <<<<<<<<
+
+
+@api.get(
+    path="/scoring/status",
+    tags=["MICROSERVICES - Scoring"],
+    name="check scoring microservice API status",
+)
+async def scoring_status():
+    response = requests.get(url="http://scoring:8006/status")
+    return return_request(response)
+
+
+@api.post(
+    path="/scoring/label-prediction",
+    tags=["MICROSERVICES - Scoring"],
+    name="label prediction",
+)
+async def scoring_label_prediction(
+    input_data: InputDataLabelPred, identification=Header(None)
+):
+    verify_rights(identification, 0)  # at least user rights
+    payload = input_data.model_dump()
+    response = requests.post(url="http://scoring:8006/label-prediction", json=payload)
+    return return_request(response)
+
+
+@api.get(
+    path="/scoring/update-f1-score",
+    tags=["MICROSERVICES - Scoring"],
+    name="update f1 score",
+)
+async def scoring_update_f1_score(identification=Header(None)):
+    ## perform authentication and authorization checks
+    verify_rights(identification, 1)  ### 1 for robot and administrator
+
+    ## call mirror endpoint in `scoring` microservice
+    response = requests.get(url="http://scoring:8006/update-f1-score")
+
+    ## save f1 score from `scoring` microservice response
+    f1_score = return_request(response)
+
+    ## return f1 score
+    return f1_score
+
+
+@api.get(
+    path="/scoring/get-f1-scores",
+    tags=["MICROSERVICES - Scoring"],
+    name="get f1 scores",
+)
+async def scoring_get_f1_scores(identification=Header(None)):
+    ## perform authentication and authorization checks
+    verify_rights(identification, 1)  ### 1 for robot and administrator
+
+    ## call mirror endpoint in `scoring` microservice
+    response = requests.get(url="http://scoring:8006/get-f1-scores")
+
+    ## save f1 scores from `scoring` microservice response
+    f1_scores = return_request(response).strip()
+
+    ## return f1 scores
+    return f1_scores
+
+
+@api.get(
+    path="/scoring/get-latest-f1-score",
+    tags=["MICROSERVICES - Scoring"],
+    name="get latest f1-score",
+)
+async def scoring_get_latest_f1_score(identification=Header(None)):
+    ## perform authentication and authorization checks
+    verify_rights(identification, 1)  ### 1 for robot and administrator
+
+    ## call mirror endpoint in `scoring` microservice
+    response = requests.get(url="http://scoring:8006/get-latest-f1-score")
+
+    ## save latest f1-score from `scoring` microservice response
+    f1_score = return_request(response)
+
+    ## return latest f1-score
+    return f1_score
+
+
+# >>>>>>>> LINEAGE <<<<<<<<
+
+@api.get(
+        path="/lineage/all",
+        tags=["MICROSERVICES -  Lineage"],
+        name="get all lineage logs"
+)
+async def lineage_all(identification=Header(None)):
+    user = verify_rights(identification, 1)  # 1 for robot and administrator
+# endpoint - all
+
+    with mariadb_engine.connect() as connection:
+        results = connection.execute(text("SELECT * FROM lineage_table;"))
+        lineage_db = {
+            time_stamp: {"Debut": start_year, "Fin": end_year, "Duree": delay, "User": user, "Commentaire": comment} for time_stamp, start_year, end_year, delay, user, comment in results
+        }
+    return lineage_db
